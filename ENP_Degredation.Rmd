@@ -1,0 +1,369 @@
+---
+title: "ENP_Degredation"
+author: "Cindy Chen"
+date: "2025-09-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project description
+
+This project is designed to understand the ecological characteristics of degraded zones in the Florida Everglades- more specifically, [the southeast saline Everglades](https://link.springer.com/article/10.1007/BF00539820).
+
+A .kml file with randomly distributed points has been manually classified as either **White Zone** (WZ, degraded) or **Vegetation Zone** (VZ, vegetated) in Google Earth. 
+
+```{r, message= FALSE}
+# Load libraries
+library(sf)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+# Read and clean kml file
+cp <- st_read("merged_cropped_points.kml")
+cp <- cp[!is.na(cp$Description) & cp$Description != "NA", ]    # Remove NA values in case of manual errors
+unique(cp$Description)  # This should return "WZ" "VZ"
+nrow(cp)  #This returns the number of eligible points
+```
+
+Geographical coordinates are extracted from the file and uploaded to AppEEARS to extract HLS spectral band values for each point. 
+```{r}
+# Extract Long (X) and Lat (Y) from kml geometry
+coordinates <- st_coordinates(cp)
+cp$Latitude <- coordinates[, "Y"]
+cp$Longitude <- coordinates[, "X"]
+
+# Split into two files for AppEEARS submission
+cp01<- cp[1:1000, ] #AppEEARS can only accept 1000 points max for one submission
+cp02<- cp[1001:nrow(cp),]
+
+# Remove geometry
+cp01 <- cp01 %>% st_drop_geometry()
+cp02 <- cp02 %>% st_drop_geometry()
+
+# Round to join csv with AppEEARS results
+cp01$Latitude <- round(cp01$Latitude, 6)
+cp01$Longitude <- round(cp01$Longitude, 6)
+cp02$Latitude <- round(cp02$Latitude, 6)
+cp02$Longitude <- round(cp02$Longitude, 6)
+
+# Keep only lat and long coordinates
+cp01_App<- cp01[, c("Latitude", "Longitude")]
+cp02_App <- cp02[, c("Latitude", "Longitude")]
+
+colnames(cp01_App) <- NULL
+colnames(cp02_App) <- NULL
+
+# Clean and check for duplicated rows
+cp01_App <- unique(cp01_App)
+cp02_App <- unique(cp02_App)
+
+# Save output to csv files
+write.csv(cp01_App, "cp01_App.csv", row.names = FALSE)
+write.csv(cp02_App, "cp02_App.csv", row.names = FALSE)
+```
+
+HLS band values are downloaded from AppEEARS and merged with the land classification type (WZ/VZ) for each point. 
+```{r}
+# Read band results from AppEEARS submissions
+l30p1 <- read.csv("HLSL30-cp01-250903-HLSL30-020-results.csv") #l30p1 refers to product HLSL30, part 1 (the first 1000 points); etc.
+l30p2 <- read.csv("HLSL30-cp02-250903-HLSL30-020-results.csv")
+s30p1 <- read.csv('HLSS30-cp01-250903-HLSS30-020-results.csv') 
+s30p2 <- read.csv("HLSS30-cp02-250903-HLSS30-020-results.csv")
+```
+
+##### Here I am filtering for data points that are 
+* (1) low in aerosol (disturbing particles) level
+* (2) not identified as open water 
+* (3) not identified as snow or ice 
+* (4) not shaded by clouds 
+* (5) not adjacent to clouds
+* (6) not identified as clouds 
+
+based on the quality control flags available in the AppEEARS results file. Interpretation of columns is based on [the Harmonized Landsat Sentinel-2 (HLS) Product User Guide (Product Version 2.0)](https://lpdaac.usgs.gov/documents/1698/HLS_User_Guide_V2.pdf).
+
+```{r}
+# Filter for "non-distrupted" data
+l30p1 <- subset(l30p1,
+                HLSL30_020_Fmask_Aerosol_level_Description %in% c("Low aerosol") &
+                HLSL30_020_Fmask_Water_Description == "No" &
+                HLSL30_020_Fmask_Snow.ice_Description == "No" &
+                HLSL30_020_Fmask_Cloud_shadow_Description == "No" &
+                HLSL30_020_Fmask_Adjacent_to_cloud.shadow_Description == "No" &
+                HLSL30_020_Fmask_Cloud_Description == "No"
+                 )
+
+l30p2 <- subset(l30p2,
+                HLSL30_020_Fmask_Aerosol_level_Description %in% c("Low aerosol") &
+                HLSL30_020_Fmask_Water_Description == "No" &
+                HLSL30_020_Fmask_Snow.ice_Description == "No" &
+                HLSL30_020_Fmask_Cloud_shadow_Description == "No" &
+                HLSL30_020_Fmask_Adjacent_to_cloud.shadow_Description == "No" &
+                HLSL30_020_Fmask_Cloud_Description == "No"
+                 )
+
+s30p1 <- subset(s30p1,
+                HLSS30_020_Fmask_Aerosol_level_Description %in% c("Low aerosol") &
+                HLSS30_020_Fmask_Water_Description == "No" &
+                HLSS30_020_Fmask_Snow.ice_Description == "No" &
+                HLSS30_020_Fmask_Cloud_shadow_Description == "No" &
+                HLSS30_020_Fmask_Adjacent_to_cloud.shadow_Description == "No" &
+                HLSS30_020_Fmask_Cloud_Description == "No"
+                )
+
+s30p2 <- subset(s30p2,
+                HLSS30_020_Fmask_Aerosol_level_Description %in% c("Low aerosol") &
+                HLSS30_020_Fmask_Water_Description == "No" &
+                HLSS30_020_Fmask_Snow.ice_Description == "No" &
+                HLSS30_020_Fmask_Cloud_shadow_Description == "No" &
+                HLSS30_020_Fmask_Adjacent_to_cloud.shadow_Description == "No" &
+                HLSS30_020_Fmask_Cloud_Description == "No"
+                 )
+```
+
+A filtered version of the AppEEARS band results (all quality flags removed) is combined with the point classifications.
+```{r}
+# Select columns of interest
+l30_selections <- c('Latitude', 'Longitude', 'Date', 
+                    'HLSL30_020_B01', 'HLSL30_020_B02',	'HLSL30_020_B03',	'HLSL30_020_B04',	'HLSL30_020_B05',	
+                    'HLSL30_020_B06',	'HLSL30_020_B07',	'HLSL30_020_B09', 'HLSL30_020_B10',	'HLSL30_020_B11')
+s30_selections <- c('Latitude', 'Longitude', 'Date', 
+                    'HLSS30_020_B01', 'HLSS30_020_B02',	'HLSS30_020_B03',	'HLSS30_020_B04',	'HLSS30_020_B05',	
+                    'HLSS30_020_B06',	'HLSS30_020_B07',	'HLSS30_020_B08',	'HLSS30_020_B09', 'HLSS30_020_B10',	
+                    'HLSS30_020_B11', 'HLSS30_020_B12', 'HLSS30_020_B8A')
+
+l30p1 <- l30p1 %>% select(all_of(l30_selections))
+l30p2 <- l30p2 %>% select(all_of(l30_selections))
+s30p1 <- s30p1 %>% select(all_of(s30_selections))
+s30p2 <- s30p2 %>% select(all_of(s30_selections))
+
+# Round coordinates to the same number of digits
+l30p1$Latitude <- round(l30p1$Latitude, 6)
+l30p1$Longitude <- round(l30p1$Longitude, 6)
+l30p2$Latitude <- round(l30p2$Latitude, 6)
+l30p2$Longitude <- round(l30p2$Longitude, 6)
+s30p1$Latitude <- round(s30p1$Latitude, 6)
+s30p1$Longitude <- round(s30p1$Longitude, 6)
+s30p2$Latitude <- round(s30p2$Latitude, 6)
+s30p2$Longitude <- round(s30p2$Longitude, 6)
+
+# Merge point coordinates and AppEEARS band data
+merged_l30p1 <- merge(cp01, l30p1, by = c("Latitude", "Longitude"), all.x = TRUE, na.omit = T)
+merged_l30p2 <- merge(cp02, l30p2, by = c("Latitude", "Longitude"), all.x = TRUE, na.omit = T)
+merged_s30p1 <- merge(cp01, s30p1, by = c("Latitude", "Longitude"), all.x = TRUE, na.omit = T)
+merged_s30p2 <- merge(cp02, s30p2, by = c("Latitude", "Longitude"), all.x = TRUE, na.omit = T)
+
+# Clean duplicated rows
+merged_l30p1 <- merged_l30p1 %>% distinct()
+merged_l30p2 <- merged_l30p2 %>% distinct()
+merged_s30p1 <- merged_s30p1 %>% distinct()
+merged_s30p2 <- merged_s30p2 %>% distinct()
+```
+
+To differentiate between HLSL30 and HLSS30 product results, the suffixes .lst (Landsat) and .sent (Sentinel-2) are added to the corresponding column titles for the two sets of data.
+```{r}
+# Rename columns
+names(merged_l30p1) <- c(
+  "Latitude", "Longitude", "Name", "Description", "Date", 
+  "B01.lst", "B02.lst", "B03.lst", "B04.lst", "B05.lst", 
+  "B06.lst", "B07.lst", "B09.lst", "B10.lst", "B11.lst"
+)
+
+names(merged_l30p2) <- c(
+  "Latitude", "Longitude", "Name", "Description", "Date", 
+  "B01.lst", "B02.lst", "B03.lst", "B04.lst", "B05.lst", 
+  "B06.lst", "B07.lst", "B09.lst", "B10.lst", "B11.lst"
+)
+
+names(merged_s30p1) <- c(
+  "Latitude", "Longitude", "Name", "Description", "Date", 
+  "B01.sent", "B02.sent", "B03.sent", "B04.sent", "B05.sent", 
+  "B06.sent", "B07.sent", "B08.sent", "B09.sent", "B10.sent", "B11.sent", 
+  "B12.sent", "B8A.sent"
+)
+
+
+names(merged_s30p2) <- c(
+  "Latitude", "Longitude", "Name", "Description", "Date", 
+  "B01.sent", "B02.sent", "B03.sent", "B04.sent", "B05.sent", 
+  "B06.sent", "B07.sent", "B08.sent", "B09.sent", "B10.sent", "B11.sent", 
+  "B12.sent", "B8A.sent"
+)
+```
+
+Here I transform all negative band reflectance values (not ecologically interpretable) into 0.
+```{r}
+# Transforming negative values to 0
+merged_l30p1[, 6:15] <- lapply(merged_l30p1[, 6:15], function(x) ifelse(x < 0, 0, x))
+merged_l30p2[, 6:15] <- lapply(merged_l30p2[, 6:15], function(x) ifelse(x < 0, 0, x))
+merged_s30p1[, 6:18] <- lapply(merged_s30p1[, 6:18], function(x) ifelse(x < 0, 0, x))
+merged_s30p2[, 6:18] <- lapply(merged_s30p2[, 6:18], function(x) ifelse(x < 0, 0, x))
+```
+
+The following 6 Vegetation Indices (VIs) are calculated according to the formulas provided in [the Harmonized Landsat Sentinel-2 (HLS) Vegetation Indices (VI) Product User Guide](https://lpdaac.usgs.gov/documents/2088/HLS_VI_User_Guide_V2.pdf).
+```{r}
+# Calculate Vegetation Indices
+merged_l30p1 <- merged_l30p1 %>%
+  mutate(
+    NDVI.lst = (B05.lst - B04.lst) / (B05.lst + B04.lst),
+    EVI.lst  = 2.5 * (B05.lst - B04.lst) / (B05.lst + 6 * B04.lst - 7.5 * B02.lst + 1),
+    SAVI.lst = 1.5 * (B05.lst - B04.lst) / (B05.lst + B04.lst + 0.5),
+    MSAVI.lst = (2 * B05.lst + 1 - sqrt((2 * B05.lst + 1)^2 - 8 * (B05.lst - B04.lst))) / 2,
+    NDWI.lst = (B03.lst - B05.lst) / (B03.lst + B05.lst),
+    NDMI.lst = (B05.lst - B06.lst) / (B05.lst + B06.lst)
+  )
+
+merged_l30p2 <- merged_l30p2 %>%
+  mutate(
+    NDVI.lst = (B05.lst - B04.lst) / (B05.lst + B04.lst),
+    EVI.lst  = 2.5 * (B05.lst - B04.lst) / (B05.lst + 6 * B04.lst - 7.5 * B02.lst + 1),
+    SAVI.lst = 1.5 * (B05.lst - B04.lst) / (B05.lst + B04.lst + 0.5),
+    MSAVI.lst = (2 * B05.lst + 1 - sqrt((2 * B05.lst + 1)^2 - 8 * (B05.lst - B04.lst))) / 2,
+    NDWI.lst = (B03.lst - B05.lst) / (B03.lst + B05.lst),
+    NDMI.lst = (B05.lst - B06.lst) / (B05.lst + B06.lst)
+  )
+
+merged_s30p1 <- merged_s30p1 %>%
+  mutate(
+    NDVI.sent = (B8A.sent - B04.sent) / (B8A.sent + B04.sent),
+    EVI.sent  = 2.5 * (B8A.sent - B04.sent) / (B8A.sent + 6 * B04.sent - 7.5 * B02.sent + 1),
+    SAVI.sent = 1.5 * (B8A.sent - B04.sent) / (B8A.sent + B04.sent + 0.5),
+    MSAVI.sent = (2 * B8A.sent + 1 - sqrt((2 * B8A.sent + 1)^2 - 8 * (B8A.sent - B04.sent))) / 2,
+    NDWI.sent = (B03.sent - B8A.sent) / (B03.sent + B8A.sent),
+    NDMI.sent = (B8A.sent - B11.sent) / (B8A.sent + B11.sent)
+  )
+
+merged_s30p2 <- merged_s30p2 %>%
+  mutate(
+    NDVI.sent = (B8A.sent - B04.sent) / (B8A.sent + B04.sent),
+    EVI.sent  = 2.5 * (B8A.sent - B04.sent) / (B8A.sent + 6 * B04.sent - 7.5 * B02.sent + 1),
+    SAVI.sent = 1.5 * (B8A.sent - B04.sent) / (B8A.sent + B04.sent + 0.5),
+    MSAVI.sent = (2 * B8A.sent + 1 - sqrt((2 * B8A.sent + 1)^2 - 8 * (B8A.sent - B04.sent))) / 2,
+    NDWI.sent = (B03.sent - B8A.sent) / (B03.sent + B8A.sent),
+    NDMI.sent = (B8A.sent - B11.sent) / (B8A.sent + B11.sent)
+  )
+
+
+# Combine into two large data frames
+indices.lst <- bind_rows(merged_l30p1, merged_l30p2)
+indices.sent <- bind_rows(merged_s30p1, merged_s30p2)
+
+# Remove NAs
+indices.lst <- na.omit(indices.lst)
+indices.sent <- na.omit(indices.sent)
+
+# Check results
+str(indices.lst)
+str(indices.sent)
+```
+
+Despite an available key, the band names are still somewhat confusing. Here I merge the two versions of data products with a unified description of the bands and VIs. For clarity, band column titles have been translated to "Blue", "Red", "Green", "NIR", "SWIR_1", "SWIR_2" according to [the HLS spectral bands nomenclature](https://lpdaac.usgs.gov/documents/2088/HLS_VI_User_Guide_V2.pdf).
+```{r}
+## Merging two data versions 
+# Define the vegetation indices column names
+index.names.lst <- c("NDVI.lst", "EVI.lst", "SAVI.lst", "MSAVI.lst", "NDWI.lst",
+                     "NDMI.lst")
+
+index.names.sent<- c("NDVI.sent", "EVI.sent", "SAVI.sent", "MSAVI.sent", "NDWI.sent",
+                     "NDMI.sent")
+
+# Add Version column to each dataframe
+indices.lst$Version <- "Landsat"
+indices.sent$Version <- "Sentinel-2"
+
+# Create new dataframes with standardized column names
+lst_df <- data.frame(
+  Latitude = indices.lst$Latitude,
+  Longitude = indices.lst$Longitude,
+  Name = indices.lst$Name,
+  Description = indices.lst$Description,
+  Date = indices.lst$Date,
+  Version = indices.lst$Version,
+  Blue = indices.lst$B02.lst,
+  Green = indices.lst$B03.lst,
+  Red = indices.lst$B04.lst,
+  NIR = indices.lst$B05.lst,
+  SWIR_1 = indices.lst$B06.lst,
+  SWIR_2 = indices.lst$B07.lst,
+  NDVI = indices.lst$NDVI.lst,
+  EVI = indices.lst$EVI.lst,
+  SAVI = indices.lst$SAVI.lst,
+  MSAVI = indices.lst$MSAVI.lst,
+  NDWI = indices.lst$NDWI.lst,
+  NDMI = indices.lst$NDMI.lst
+)
+
+sent_df <- data.frame(
+  Latitude = indices.sent$Latitude,
+  Longitude = indices.sent$Longitude,
+  Name = indices.sent$Name,
+  Description = indices.sent$Description,
+  Date = indices.sent$Date,
+  Version = indices.sent$Version,
+  Blue = indices.sent$B02.sent,
+  Green = indices.sent$B03.sent,
+  Red = indices.sent$B04.sent,
+  NIR = indices.sent$B8A.sent,
+  SWIR_1 = indices.sent$B11.sent,
+  SWIR_2 = indices.sent$B12.sent,
+  NDVI = indices.sent$NDVI.sent,
+  EVI = indices.sent$EVI.sent,
+  SAVI = indices.sent$SAVI.sent,
+  MSAVI = indices.sent$MSAVI.sent,
+  NDWI = indices.sent$NDWI.sent,
+  NDMI = indices.sent$NDMI.sent
+)
+
+# Combine the two dataframes
+indices.all <- rbind(lst_df, sent_df)
+
+# Verify the structure
+str(indices.all)
+
+# Filter NAs
+indices.all <- na.omit(indices.all)
+
+# Check outliers: the specific rows containing outliers (if any) will be identified
+outliers.ndvi <- indices.all %>%
+  filter(NDVI< -1 | NDVI > 1)
+
+outliers.evi <- indices.all %>%
+  filter(EVI < -1 | EVI > 1)
+
+outliers.savi <- indices.all %>%
+  filter(SAVI < -1 | SAVI > 1)
+
+outliers.msavi <- indices.all %>%
+  filter(MSAVI < -1 | MSAVI > 1)
+
+outliers.ndwi <- indices.all %>%
+  filter(NDWI < -1 | NDWI > 1)
+
+outliers.ndmi <- indices.all %>%
+  filter(NDMI < -1 | NDMI > 1)
+
+# View results
+head(indices.all)
+```
+
+The minimum and maximum values for each VI is inspected.
+```{r}
+# Check VI ranges
+range(indices.all$NDVI)
+range(indices.all$EVI)
+range(indices.all$SAVI)
+range(indices.all$MSAVI)
+range(indices.all$NDWI)
+range(indices.all$NDMI)
+```
+
+The final output is saved.
+```{r}
+# Save output
+write.csv(indices.all, "indices_all.csv")
+```
